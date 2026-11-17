@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Batch reconciliation: `reconcile()` and `areconcile()` check a list of `ExpectedOrder`s against the read-only
+  Transaction Query API and classify each one as `paid`, `amount_mismatch`, `currency_mismatch`,
+  `multiple_payments`, `pending`, `not_paid`, `not_found` or `error`, in a `ReconcileReport` with JSON and CSV output.
+- `load_orders()` reads the expected orders from CSV (`tran_id`, optional `amount` and `currency`; common header
+  aliases, comma/semicolon/tab delimiters).
+- `sslcommerz reconcile` command with `--format json|csv`, `--output`, `--tolerance`, `--delay` and
+  `--fail-on problems|unpaid|never`; exit code `4` when problems are found.
+- `examples/orders.csv`; `examples/reconcile.py` now uses `reconcile()`.
+- `CODE_OF_CONDUCT.md`, issue templates and a pull request template.
+
+### Changed
+
+- The CLI reports unreadable (non UTF-8) input files as a usage error (exit `2`) instead of a traceback.
+
 ## [0.1.0] - 2026-11-12
 
 ### Added

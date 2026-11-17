@@ -50,6 +50,15 @@ from .models import (
     TransactionQueryResult,
     ValidationResult,
 )
+from .reconcile import (
+    ExpectedOrder,
+    ReconcileReport,
+    ReconcileResult,
+    ReconcileStatus,
+    areconcile,
+    load_orders,
+    reconcile,
+)
 from .transport import RetryPolicy
 
 __all__ = [
@@ -61,6 +70,7 @@ __all__ = [
     "AsyncSSLCommerz",
     "AuthenticationError",
     "CartItem",
+    "ExpectedOrder",
     "Config",
     "ConfigurationError",
     "Customer",
@@ -76,6 +86,9 @@ __all__ = [
     "PaymentNotValidError",
     "PaymentRequest",
     "Product",
+    "ReconcileReport",
+    "ReconcileResult",
+    "ReconcileStatus",
     "RefundError",
     "RefundInitStatus",
     "RefundResult",
@@ -98,6 +111,9 @@ __all__ = [
     "ValidationStatus",
     "VerifiedPayment",
     "__version__",
+    "areconcile",
     "compute_signature",
+    "load_orders",
+    "reconcile",
     "verify_signature",
 ]

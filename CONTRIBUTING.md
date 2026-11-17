@@ -26,6 +26,7 @@ The code must keep working on Python 3.9 (use `typing.Optional`, `List` and so o
 | `src/sslcommerz_py/models.py` | Request and response dataclasses |
 | `src/sslcommerz_py/hashing.py` | `verify_sign` / `verify_key` |
 | `src/sslcommerz_py/ipn.py` | `IPNVerifier` |
+| `src/sslcommerz_py/reconcile.py` | Batch reconciliation over the Transaction Query API (no I/O of its own) |
 | `src/sslcommerz_py/cli.py` | `sslcommerz` command |
 | `tests/` | pytest suites; `tests/conftest.py` holds the scripted transport and gateway samples |
 | `examples/` | Runnable examples (Flask/FastAPI ones are tested) |
@@ -52,4 +53,5 @@ The code must keep working on Python 3.9 (use `typing.Optional`, `List` and so o
 
 ## Code of conduct
 
-Be respectful and constructive. Harassment of any kind is not tolerated.
+This project follows the [Code of Conduct](CODE_OF_CONDUCT.md). Be respectful and constructive; harassment of any
+kind is not tolerated.

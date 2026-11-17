@@ -12,7 +12,7 @@ import dataclasses
 import json
 import os
 import sys
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import parse_qsl
 
@@ -28,6 +28,7 @@ from .errors import (
 )
 from .hashing import verify_signature
 from .models import Customer, PaymentRequest, Product
+from .reconcile import UNPAID_STATUSES, ExpectedOrder, ReconcileReport, load_orders, reconcile
 
 EXIT_OK = 0
 EXIT_API = 1
@@ -71,6 +72,16 @@ def _config(args: argparse.Namespace, env: Mapping[str, str]) -> Config:
     if args.timeout:
         overrides["timeout"] = args.timeout
     return Config.from_env(env, **overrides)
+
+
+def _tolerance_arg(text: str) -> Decimal:
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not value.is_finite() or value < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative number")
+    return value
 
 
 def _read_payload(source: str, stdin: Any) -> Dict[str, Any]:
@@ -135,6 +146,40 @@ def cmd_refund_status(client: SSLCommerz, args: argparse.Namespace) -> Any:
     return client.refund_status(args.refund_ref_id)
 
 
+def _reconcile_orders(args: argparse.Namespace, stdin: Any) -> List[ExpectedOrder]:
+    orders: List[ExpectedOrder] = []
+    if args.orders:
+        orders.extend(load_orders(stdin if args.orders == "-" else args.orders))
+    orders.extend(ExpectedOrder.create(t, currency=args.currency) for t in args.tran_id or [])
+    if not orders:
+        raise ValidationError("orders", "give a CSV file or at least one --tran-id")
+    return orders
+
+
+def _reconcile_exit(report: ReconcileReport, fail_on: str) -> int:
+    if fail_on == "never":
+        return EXIT_OK
+    bad = report.has_problems
+    if fail_on == "unpaid":
+        bad = bad or any(r.status in UNPAID_STATUSES for r in report.results)
+    return EXIT_INVALID if bad else EXIT_OK
+
+
+def cmd_reconcile(client: SSLCommerz, args: argparse.Namespace, stdin: Any, out: Any) -> int:
+    orders = _reconcile_orders(args, stdin)
+    report = reconcile(client, orders, tolerance=args.tolerance, delay=args.delay)
+    if args.format == "csv":
+        text = report.to_csv()
+    else:
+        text = json.dumps(report.to_dict(), indent=2 if args.pretty else None, ensure_ascii=False) + "\n"
+    if args.output and args.output != "-":
+        with open(args.output, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+    else:
+        out.write(text)
+    return _reconcile_exit(report, args.fail_on)
+
+
 # ------------------------------------------------------------------- parser
 
 
@@ -194,6 +239,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("refund_ref_id")
     s.set_defaults(func=cmd_refund_status)
 
+    s = sub.add_parser(
+        "reconcile",
+        help="check many orders against the Transaction Query API (read-only)",
+        description="Query every order by tran_id and report paid, unpaid, mismatched and double-paid orders.",
+    )
+    s.add_argument("orders", nargs="?", help="CSV with tran_id[,amount][,currency] columns, or - for stdin")
+    s.add_argument("--tran-id", action="append", help="order to check without an amount (repeatable)")
+    s.add_argument("--currency", default="BDT", help="currency for --tran-id orders (default: BDT)")
+    s.add_argument("--tolerance", type=_tolerance_arg, help="allowed amount difference (default: exact)")
+    s.add_argument("--format", choices=["json", "csv"], default="json", help="report format (default: json)")
+    s.add_argument("-o", "--output", help="write the report to a file instead of stdout")
+    s.add_argument(
+        "--fail-on",
+        choices=["problems", "unpaid", "never"],
+        default="problems",
+        help="exit 4 on mismatches/double payments/errors (problems), also on unpaid orders (unpaid), or never",
+    )
+    s.add_argument("--delay", type=float, default=0.0, help="seconds to wait between queries")
+    s.set_defaults(func=None)
+
     s = sub.add_parser("verify-hash", help="check verify_sign of a saved IPN payload (offline)")
     s.add_argument("payload", help="JSON or form-encoded file, or - for stdin")
     s.set_defaults(func=None)
@@ -226,6 +291,12 @@ def main(
             _print({"valid": ok, "verify_key": payload.get("verify_key")}, args, out)
             return EXIT_OK if ok else EXIT_INVALID
         factory = client_factory or (lambda c: SSLCommerz(config=c))
+        if args.command == "reconcile":
+            client = factory(config)
+            try:
+                return cmd_reconcile(client, args, stdin or sys.stdin, out)
+            finally:
+                client.close()
         client = factory(config)
         try:
             result = args.func(client, args)
@@ -248,7 +319,7 @@ def main(
     except SSLCommerzError as exc:
         err.write(f"error: {exc}\n")
         return EXIT_API
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         err.write(f"error: {exc}\n")
         return EXIT_USAGE
 

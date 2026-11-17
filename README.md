@@ -45,6 +45,9 @@ all of that in one call, with a sync client, an async client and a command line 
 - **Hash verification** - `verify_signature()` / `compute_signature()` implement the `verify_key` / `verify_sign`
   md5 scheme used by the official SSLCommerz libraries, with constant-time comparison.
 - **Transaction query** by `tran_id` (all attempts) and by `sessionkey`.
+- **Batch reconciliation** - `reconcile()` / `sslcommerz reconcile orders.csv` checks a list of your orders against
+  the read-only Transaction Query API and flags amount or currency mismatches, double payments, pending and unpaid
+  orders, with JSON or CSV output for cron jobs.
 - **Refunds** - initiate (with the required `refund_trans_id`) and refund status by `refund_ref_id`.
 - **Sandbox and live** hosts, or any custom base URL.
 - **Typed errors** - `APIConnect` values map to `InvalidRequestError`, `AuthenticationError` and
@@ -55,7 +58,7 @@ all of that in one call, with a sync client, an async client and a command line 
 - **Injectable transport** - pass `httpx.MockTransport` in tests or your own `httpx.Client` for proxies and TLS.
 - **Sync and async** clients with the same API (`SSLCommerz`, `AsyncSSLCommerz`).
 - **Dataclass models** that keep the full response in `raw`, amounts as `Decimal`.
-- **CLI** - `sslcommerz init | validate | query | refund | refund-status | verify-hash`.
+- **CLI** - `sslcommerz init | validate | query | reconcile | refund | refund-status | verify-hash`.
 - **Flask and FastAPI** IPN examples, tested in CI.
 - Redacted logging: the store password never appears in logs or error messages.
 
@@ -189,6 +192,49 @@ a duplicate IPN or redirect, so make fulfilment idempotent) and `is_high_risk` (
 Binds `verify_ipn()` to your order store. `lookup(tran_id)` returns `(amount, currency)` or `None`. `verify(form)`
 raises; `handle(form)` returns an `IPNOutcome(ok, tran_id, payment, error, status)`.
 
+### Reconciliation
+
+`reconcile(client, orders)` calls `query_by_tran_id()` for each `ExpectedOrder(tran_id, amount, currency)` and
+returns a `ReconcileReport`. Nothing is changed at the gateway, so it is safe to run on a schedule.
+
+```python
+from sslcommerz_py import ExpectedOrder, SSLCommerz, load_orders, reconcile
+
+orders = load_orders("orders.csv")  # or [ExpectedOrder.create("INV-1001", "1250.00", "BDT"), ...]
+with SSLCommerz.from_env() as sslc:
+    report = reconcile(sslc, orders, delay=0.2)
+
+for r in report.problems:          # mismatches, double payments, failed queries
+    alert(r.tran_id, r.status.value, r.detail)
+for r in report.results:
+    if r.ok:
+        mark_paid(r.tran_id, bank_tran_id=r.bank_tran_id, review=r.high_risk)
+```
+
+| `ReconcileStatus` | Meaning | Problem? |
+| --- | --- | --- |
+| `paid` | One paid attempt (`VALID`/`VALIDATED`), currency and amount match | no |
+| `currency_mismatch` | Paid in another currency than the order | yes |
+| `amount_mismatch` | Paid amount differs by more than the tolerance | yes |
+| `multiple_payments` | Two or more distinct paid attempts for one `tran_id`: refund the extra | yes |
+| `pending` | Nothing paid yet, an attempt is `PENDING` | no |
+| `not_paid` | Attempts exist, none paid (failed, cancelled...) | no |
+| `not_found` | The gateway has no transaction for this `tran_id` | no |
+| `error` | The query failed (network, HTTP or response error); `.error` holds the exception | yes |
+
+Non-BDT orders are compared on `currency_type`/`currency_amount`, like `verify_ipn()`. The tolerance defaults to
+`Config.amount_tolerance`; pass `tolerance=` to override. Orders without an amount only check that a payment exists
+in the right currency. A failed query does not stop the run, but `AuthenticationError` and `InactiveStoreError` do,
+because every other query would fail the same way. Duplicate `tran_id`s in the input raise `ValidationError`.
+
+`areconcile(async_client, orders, concurrency=4)` is the async version; results keep the input order.
+`report.to_dict()` and `report.to_csv()` give the same data the CLI prints. CSV values that would start a spreadsheet
+formula are prefixed with `'`.
+
+`load_orders(path_or_stream)` reads a CSV with a `tran_id` column (also `transaction_id` or `order_id`) and optional
+`amount` (or `total_amount`) and `currency` (default `BDT`) columns. Comma, semicolon and tab delimiters and a UTF-8
+BOM are accepted; a bad value raises `ValidationError` with the line number.
+
 ### Hashing
 
 ```python
@@ -289,6 +335,9 @@ sslcommerz init --amount 150 --tran-id INV-1 \
 sslcommerz --pretty validate 1709162025351ElIuHtUtFReBwE
 sslcommerz query --tran-id INV-1
 sslcommerz query --session-key F298BC45B0688E02768900C4F6B28C8B
+sslcommerz --pretty reconcile orders.csv                 # tran_id,amount,currency per line
+sslcommerz reconcile orders.csv --format csv -o report.csv --delay 0.2
+sslcommerz reconcile --tran-id INV-1 --tran-id INV-2 --fail-on unpaid
 sslcommerz refund --bank-tran-id 1709162345070ANJdZV8LyI4cMw --amount 50 \
   --remarks "Out of stock" --refund-trans-id RF-1001
 sslcommerz refund-status 59bd63fea5455
@@ -299,7 +348,12 @@ Global flags: `--store-id`, `--store-passwd` (prefer the environment), `--env sa
 `--timeout`, `--pretty`, `--raw` (include the raw gateway response). Output is JSON.
 
 Exit codes: `0` ok, `1` gateway/API error, `2` usage or configuration error, `3` network error, `4` not valid (bad
-hash, or `validate` returned a non-paid status).
+hash, `validate` returned a non-paid status, or `reconcile` found problems).
+
+`reconcile` options: `--format json|csv`, `-o/--output FILE`, `--tolerance AMOUNT`, `--delay SECONDS` between
+queries, `--currency` for `--tran-id` orders, and `--fail-on problems|unpaid|never`. The default `problems` exits `4`
+on mismatches, double payments and failed queries; `unpaid` also on pending, unpaid and unknown orders. The JSON
+report has a `summary` with a count per status and one entry per order in `results`.
 
 ## Docker image
 
@@ -332,7 +386,8 @@ host whose outbound IP is whitelisted.
 | [examples/fastapi_app.py](examples/fastapi_app.py) | FastAPI IPN listener with the async client |
 | [examples/create_session.py](examples/create_session.py) | Create a sandbox session from the command line |
 | [examples/refund.py](examples/refund.py) | Initiate a refund and poll its status |
-| [examples/reconcile.py](examples/reconcile.py) | Resolve orders whose IPN never arrived |
+| [examples/reconcile.py](examples/reconcile.py) | Resolve orders whose IPN never arrived with `reconcile()` |
+| [examples/orders.csv](examples/orders.csv) | Sample order list for `sslcommerz reconcile` |
 | [examples/sample-ipn.json](examples/sample-ipn.json) | Signed sample IPN (store password `your_store_password`) for `verify-hash` |
 
 The Flask and FastAPI examples are exercised by `tests/test_examples.py`.
@@ -395,7 +450,7 @@ sslc = SSLCommerz("store", "pass", transport=httpx.MockTransport(handler))
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
